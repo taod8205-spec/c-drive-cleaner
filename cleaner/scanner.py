@@ -131,7 +131,7 @@ class CleanupScanner:
                         for entry in entries:
                             path = Path(entry.path)
                             try:
-                                entry_stat = entry.stat(follow_symlinks=False)
+                                entry_stat = os.stat(entry.path, follow_symlinks=False)
                                 if entry.is_symlink() or is_reparse_point(entry_stat):
                                     report.warnings.append(
                                         f"为防止越界，已跳过链接或重解析点：{path}"

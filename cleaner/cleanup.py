@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import ctypes
 import os
 import stat
-import uuid
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +14,7 @@ from .models import (
     FileFingerprint,
     RiskLevel,
 )
+from .quarantine import QuarantineStore
 from .safety import (
     DirectoryChainLock,
     DirectoryLockError,
@@ -25,17 +24,16 @@ from .safety import (
     is_reparse_point,
     mark_opened_file_for_deletion,
     open_exact_windows_file,
-    rename_opened_file,
 )
 
 
 class CleanupMode(Enum):
-    RECYCLE = "recycle"
+    QUARANTINE = "quarantine"
     PERMANENT = "permanent"
 
 
 class RemovalBackend(Protocol):
-    def recycle(self, candidate: Candidate) -> None: ...
+    def quarantine(self, candidate: Candidate) -> None: ...
 
     def permanently_delete(self, candidate: Candidate) -> None: ...
 
@@ -51,59 +49,24 @@ def _is_descendant(path: Path, root: Path) -> bool:
 
 
 class WindowsRemovalBackend:
-    """使用 Windows 回收站，或在用户二次确认后永久删除普通文件。"""
+    """按句柄移动到安全隔离区，或在用户二次确认后永久删除。"""
 
-    def recycle(self, candidate: Candidate) -> None:
+    def __init__(self, quarantine_store: QuarantineStore | None = None) -> None:
+        self._quarantine_store = quarantine_store or QuarantineStore()
+
+    def quarantine(self, candidate: Candidate) -> None:
         if os.name != "nt":
-            raise RuntimeError("移动到回收站仅支持 Windows")
+            raise RuntimeError("安全隔离仅支持 Windows")
 
         handle = self._open_verified_candidate(candidate)
-        original_path = candidate.path
-        prefix = f".慎清-{uuid.uuid4().hex}-"
-        max_original_length = max(1, 240 - len(prefix))
-        staged_path = original_path.with_name(
-            prefix + original_path.name[:max_original_length]
-        )
+        entry = self._quarantine_store.prepare(candidate)
         try:
-            rename_opened_file(handle, staged_path)
+            self._quarantine_store.commit(entry, handle)
+        except Exception:
+            self._quarantine_store.discard_prepared(entry)
+            raise
         finally:
             close_windows_handle(handle)
-
-        try:
-            self._recycle_staged_path(staged_path)
-        except OSError as exc:
-            try:
-                staged_path.rename(original_path)
-            except OSError as restore_error:
-                raise OSError(
-                    f"回收失败，文件安全保留在 {staged_path}；恢复原名也失败："
-                    f"{restore_error}"
-                ) from exc
-            raise
-
-    def _recycle_staged_path(self, path: Path) -> None:
-
-        class SHFILEOPSTRUCTW(ctypes.Structure):
-            _fields_ = [
-                ("hwnd", ctypes.c_void_p),
-                ("wFunc", ctypes.c_uint),
-                ("pFrom", ctypes.c_wchar_p),
-                ("pTo", ctypes.c_wchar_p),
-                ("fFlags", ctypes.c_ushort),
-                ("fAnyOperationsAborted", ctypes.c_int),
-                ("hNameMappings", ctypes.c_void_p),
-                ("lpszProgressTitle", ctypes.c_wchar_p),
-            ]
-
-        operation = SHFILEOPSTRUCTW()
-        operation.wFunc = 3  # FO_DELETE
-        operation.pFrom = f"{path}\0\0"
-        operation.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400
-        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-        if result != 0:
-            raise OSError(result, "Windows 无法把文件移到回收站", str(path))
-        if operation.fAnyOperationsAborted:
-            raise OSError("回收操作已取消")
 
     def permanently_delete(self, candidate: Candidate) -> None:
         handle = self._open_verified_candidate(candidate)
@@ -162,7 +125,7 @@ class CleanupExecutor:
             if mode is CleanupMode.PERMANENT and candidate.risk is RiskLevel.HIGH:
                 result.items.append(
                     CleanupItemResult(
-                        candidate, False, "高风险项目禁止永久删除，只允许移到回收站"
+                        candidate, False, "高风险项目禁止永久删除，只允许移到安全隔离区"
                     )
                 )
                 continue
@@ -179,9 +142,9 @@ class CleanupExecutor:
                         result.items.append(CleanupItemResult(candidate, False, error))
                         continue
 
-                    if mode is CleanupMode.RECYCLE:
-                        self._backend.recycle(candidate)
-                        message = "已移到回收站"
+                    if mode is CleanupMode.QUARANTINE:
+                        self._backend.quarantine(candidate)
+                        message = "已移到安全隔离区"
                     else:
                         self._backend.permanently_delete(candidate)
                         message = "已永久删除"
@@ -190,7 +153,7 @@ class CleanupExecutor:
                 result.items.append(
                     CleanupItemResult(candidate, False, f"目录安全锁失败：{exc}")
                 )
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 result.items.append(
                     CleanupItemResult(candidate, False, f"操作失败：{exc}")
                 )

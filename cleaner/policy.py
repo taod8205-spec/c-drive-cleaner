@@ -217,6 +217,7 @@ def build_default_policy(
         user_profile / "Videos",
         user_profile / "OneDrive",
         user_profile / "AppData" / "Roaming",
+        local_app_data / "慎清" / "Quarantine",
     ]
     protected_roots = [
         path for path in protected_roots if _on_drive(path, system_drive)

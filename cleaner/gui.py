@@ -12,9 +12,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import TypeAlias
 
-from .cleanup import CleanupExecutor, CleanupMode
+from .cleanup import CleanupExecutor, CleanupMode, WindowsRemovalBackend
 from .models import Candidate, CleanupResult, RiskLevel, ScanReport
 from .policy import CleanupPolicy, build_default_policy
+from .quarantine import QuarantineEntry, QuarantineStore
 from .scanner import CleanupScanner
 
 COLORS = {
@@ -87,6 +88,9 @@ class CleanerApp(tk.Tk):
         self.candidates: dict[str, Candidate] = {}
         self.selected_ids: set[str] = set()
         self.last_warnings: list[str] = []
+        self.quarantine_store = QuarantineStore(
+            allowed_drive=self.policy.system_drive
+        )
         self._busy = False
         self._worker_events: queue.Queue[_WorkerEvent] = queue.Queue()
 
@@ -236,6 +240,13 @@ class CleanerApp(tk.Tk):
         ttk.Button(
             toolbar, text="查看跳过记录", style="Soft.TButton", command=self.show_warnings
         ).pack(side="left", padx=(6, 0))
+        self.quarantine_button = ttk.Button(
+            toolbar,
+            text="查看/恢复隔离区",
+            style="Soft.TButton",
+            command=self.show_quarantine,
+        )
+        self.quarantine_button.pack(side="left", padx=(6, 0))
         ttk.Button(
             toolbar, text="打开所在位置", style="Soft.TButton", command=self.open_location
         ).pack(side="left", padx=(6, 0))
@@ -322,11 +333,11 @@ class CleanerApp(tk.Tk):
         ttk.Label(footer, textvariable=self.status_var, style="Subtitle.TLabel").pack(
             side="left", fill="x", expand=True
         )
-        self.mode = tk.StringVar(value=CleanupMode.RECYCLE.value)
+        self.mode = tk.StringVar(value=CleanupMode.QUARANTINE.value)
         ttk.Radiobutton(
             footer,
-            text="移到回收站（推荐）",
-            value=CleanupMode.RECYCLE.value,
+            text="移到安全隔离区（推荐）",
+            value=CleanupMode.QUARANTINE.value,
             variable=self.mode,
         ).pack(side="left", padx=(10, 4))
         ttk.Radiobutton(
@@ -562,6 +573,124 @@ class CleanerApp(tk.Tk):
             parent=self,
         )
 
+    def show_quarantine(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("安全隔离区 · 可恢复项目")
+        window.geometry("1040x520")
+        window.minsize(820, 400)
+        window.transient(self)
+
+        shell = ttk.Frame(window, padding=16)
+        shell.pack(fill="both", expand=True)
+        ttk.Label(
+            shell,
+            text=(
+                "隔离文件仍占用 C 盘空间。恢复操作不会覆盖原路径已有的文件，"
+                "也不会自动创建已删除的原目录。"
+            ),
+            wraplength=980,
+            justify="left",
+        ).pack(fill="x", pady=(0, 10))
+
+        columns = ("time", "risk", "size", "category", "original")
+        tree = ttk.Treeview(
+            shell, columns=columns, show="headings", selectmode="browse"
+        )
+        headings = {
+            "time": "隔离时间",
+            "risk": "风险",
+            "size": "大小",
+            "category": "类别",
+            "original": "原始路径",
+        }
+        widths = {
+            "time": 145,
+            "risk": 60,
+            "size": 95,
+            "category": 160,
+            "original": 520,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(
+                column,
+                width=widths[column],
+                minwidth=widths[column] if column != "original" else 240,
+                stretch=column == "original",
+                anchor="center" if column != "original" else "w",
+            )
+        tree.tag_configure("risk_low", foreground=COLORS["low"])
+        tree.tag_configure("risk_medium", foreground=COLORS["medium"])
+        tree.tag_configure("risk_high", foreground=COLORS["high"])
+        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="left", fill="y")
+
+        side = ttk.Frame(shell, padding=(12, 0, 0, 0))
+        side.pack(side="right", fill="y")
+        status = tk.StringVar()
+        entries: dict[str, QuarantineEntry] = {}
+
+        def reload_entries() -> None:
+            tree.delete(*tree.get_children())
+            entries.clear()
+            try:
+                listed = self.quarantine_store.list_entries()
+            except ValueError as exc:
+                messagebox.showerror("无法读取隔离区", str(exc), parent=window)
+                listed = []
+            for entry in listed:
+                entries[entry.entry_id] = entry
+                tree.insert(
+                    "",
+                    "end",
+                    iid=entry.entry_id,
+                    values=(
+                        entry.quarantined_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+                        entry.risk.label,
+                        format_size(entry.size_bytes),
+                        entry.category,
+                        str(entry.original_path),
+                    ),
+                    tags=(_risk_tag(entry.risk),),
+                )
+            status.set(f"共 {len(listed)} 项；本软件不会自动清空隔离区。")
+
+        def restore_selected() -> None:
+            selection = tree.selection()
+            if not selection or selection[0] not in entries:
+                messagebox.showinfo(
+                    "请选择项目", "请先选择一个隔离项目。", parent=window
+                )
+                return
+            entry = entries[selection[0]]
+            if not messagebox.askyesno(
+                "确认恢复",
+                f"将文件恢复到原路径：\n\n{entry.original_path}\n\n确定继续吗？",
+                parent=window,
+            ):
+                return
+            try:
+                self.quarantine_store.restore(entry)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("恢复失败", str(exc), parent=window)
+                return
+            messagebox.showinfo("恢复完成", "文件已恢复到原路径。", parent=window)
+            reload_entries()
+
+        ttk.Button(side, text="恢复所选项", command=restore_selected).pack(fill="x")
+        ttk.Button(side, text="刷新", command=reload_entries).pack(
+            fill="x", pady=(8, 0)
+        )
+        ttk.Button(side, text="关闭", command=window.destroy).pack(
+            fill="x", pady=(8, 0)
+        )
+        ttk.Label(side, textvariable=status, wraplength=170, justify="left").pack(
+            fill="x", pady=(18, 0)
+        )
+        reload_entries()
+
     def open_location(self) -> None:
         selected = self.tree.selection()
         if not selected or selected[0] not in self.candidates:
@@ -596,7 +725,7 @@ class CleanerApp(tk.Tk):
             if any(item.risk is RiskLevel.HIGH for item in selected):
                 messagebox.showerror(
                     "已阻止永久删除",
-                    "高风险项目不能在本软件中永久删除。请取消这些项目，或改用回收站模式。",
+                    "高风险项目不能在本软件中永久删除。请取消这些项目，或改用安全隔离模式。",
                     parent=self,
                 )
                 return
@@ -614,18 +743,17 @@ class CleanerApp(tk.Tk):
                 confirmation = simpledialog.askstring(
                     "高风险项目复核",
                     f"已选择高风险项目（共 {len(selected)} 项，{size}）。\n\n"
-                    "请输入“我已审查”后才可移到回收站：",
+                    "请输入“我已审查”后才可移到安全隔离区：",
                     parent=self,
                 )
                 if confirmation != "我已审查":
                     self.status_var.set("已取消高风险清理。")
                     return
             if not messagebox.askyesno(
-                "确认移到回收站",
-                f"将把 {len(selected)} 项（{size}，{summary}）移到回收站。\n\n"
-                "此操作可恢复，但在手动清空回收站之前不会释放 C 盘空间。"
-                "软件不会替你清空回收站。为防止文件在复验后被替换，回收站中的文件名"
-                "会带有“慎清-随机标识-”前缀。\n\n"
+                "确认移到安全隔离区",
+                f"将把 {len(selected)} 项（{size}，{summary}）移到安全隔离区。\n\n"
+                "此操作可从“查看/恢复隔离区”逐项恢复，但不会立即释放 C 盘空间；"
+                "软件也不会自动清空隔离区。\n\n"
                 "确定继续吗？",
                 parent=self,
             ):
@@ -635,6 +763,7 @@ class CleanerApp(tk.Tk):
 
         def worker() -> None:
             executor = CleanupExecutor(
+                backend=WindowsRemovalBackend(self.quarantine_store),
                 protected_roots=self.policy.protected_roots,
                 allowed_drive=self.policy.system_drive,
             )
@@ -660,7 +789,7 @@ class CleanerApp(tk.Tk):
             self.selected_ids.discard(item_id)
         self._set_busy(False, "")
         self.refresh_table()
-        action = "移到回收站" if mode is CleanupMode.RECYCLE else "永久删除"
+        action = "移到安全隔离区" if mode is CleanupMode.QUARANTINE else "永久删除"
         self.status_var.set(
             f"完成：{result.success_count} 项已{action}，"
             f"{result.failure_count} 项未处理；处理大小 {format_size(result.processed_bytes)}。"
@@ -690,6 +819,7 @@ class CleanerApp(tk.Tk):
         state = "disabled" if busy else "normal"
         self.scan_button.configure(state=state)
         self.clean_button.configure(state=state)
+        self.quarantine_button.configure(state=state)
         if status:
             self.status_var.set(status)
         self.configure(cursor="watch" if busy else "")

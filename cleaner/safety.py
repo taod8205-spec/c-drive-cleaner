@@ -132,7 +132,7 @@ def open_exact_windows_file(path: Path) -> int:
     handle = create_file(
         str(path),
         FILE_READ_ATTRIBUTES | DELETE_ACCESS,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_SHARE_READ,
         None,
         OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT,
@@ -169,7 +169,10 @@ def rename_opened_file(handle: int, target: Path) -> None:
         raise ExactFileError(f"暂存路径必须是绝对路径：{target}")
     encoded_target = str(target).encode("utf-16-le")
     filename_offset = _FileRenameInfoHeader.file_name.offset
-    buffer_size = filename_offset + len(encoded_target)
+    # Older Windows builds may inspect the WCHAR following FileNameLength even
+    # though the documented length excludes a terminator. Keep an explicit NUL
+    # inside the allocated buffer so the exact target name cannot gain garbage.
+    buffer_size = filename_offset + len(encoded_target) + ctypes.sizeof(ctypes.c_wchar)
     buffer = ctypes.create_string_buffer(buffer_size)
     information = _FileRenameInfoHeader.from_buffer(buffer)
     information.replace_if_exists = 0

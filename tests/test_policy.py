@@ -72,6 +72,10 @@ class DefaultPolicyTests(unittest.TestCase):
             str(Path(r"C:\Users\Reviewer\Documents")).casefold(), protected
         )
         self.assertIn(str(Path(r"C:\Program Files")).casefold(), protected)
+        self.assertIn(
+            str(Path(r"C:\Users\Reviewer\AppData\Local\慎清\Quarantine")).casefold(),
+            protected,
+        )
 
     def test_policy_never_switches_away_from_c_with_system_drive(self) -> None:
         environment = {

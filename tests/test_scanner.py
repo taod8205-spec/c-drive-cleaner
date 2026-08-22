@@ -40,6 +40,7 @@ class CleanupScannerTests(unittest.TestCase):
             self.assertEqual("低", report.candidates[0].risk.label)
             self.assertEqual(rule.reason, report.candidates[0].reason)
             self.assertEqual(old_file.stat().st_size, report.total_bytes)
+            self.assertNotEqual(0, report.candidates[0].fingerprint.inode)
             self.assertEqual([], report.warnings)
 
     def test_scan_never_follows_symbolic_links(self) -> None:

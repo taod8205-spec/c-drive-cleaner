@@ -6,15 +6,16 @@ from pathlib import Path
 
 from cleaner.cleanup import CleanupExecutor, CleanupMode, WindowsRemovalBackend
 from cleaner.models import Candidate, DirectoryIdentity, FileFingerprint, RiskLevel
+from cleaner.quarantine import QuarantineStore
 
 
 class RecordingRemovalBackend:
     def __init__(self) -> None:
-        self.recycled: list[Path] = []
+        self.quarantined: list[Path] = []
         self.deleted: list[Path] = []
 
-    def recycle(self, candidate: Candidate) -> None:
-        self.recycled.append(candidate.path)
+    def quarantine(self, candidate: Candidate) -> None:
+        self.quarantined.append(candidate.path)
 
     def permanently_delete(self, candidate: Candidate) -> None:
         self.deleted.append(candidate.path)
@@ -49,10 +50,10 @@ class CleanupExecutorTests(unittest.TestCase):
             executor = CleanupExecutor(backend=backend, allowed_drive=root.drive)
 
             result = executor.execute(
-                [candidate_for(selected, root)], mode=CleanupMode.RECYCLE
+                [candidate_for(selected, root)], mode=CleanupMode.QUARANTINE
             )
 
-            self.assertEqual([selected], backend.recycled)
+            self.assertEqual([selected], backend.quarantined)
             self.assertEqual([], backend.deleted)
             self.assertEqual(1, result.success_count)
             self.assertEqual(0, result.failure_count)
@@ -69,10 +70,10 @@ class CleanupExecutorTests(unittest.TestCase):
             executor = CleanupExecutor(backend=backend, allowed_drive=base.drive)
 
             result = executor.execute(
-                [candidate_for(outside, approved_root)], mode=CleanupMode.RECYCLE
+                [candidate_for(outside, approved_root)], mode=CleanupMode.QUARANTINE
             )
 
-            self.assertEqual([], backend.recycled)
+            self.assertEqual([], backend.quarantined)
             self.assertEqual(1, result.failure_count)
             self.assertIn("不在允许的清理目录内", result.items[0].message)
             self.assertTrue(outside.exists())
@@ -147,10 +148,10 @@ class CleanupExecutorTests(unittest.TestCase):
             backend = RecordingRemovalBackend()
 
             result = CleanupExecutor(backend=backend, allowed_drive=base.drive).execute(
-                [candidate], mode=CleanupMode.RECYCLE
+                [candidate], mode=CleanupMode.QUARANTINE
             )
 
-            self.assertEqual([], backend.recycled)
+            self.assertEqual([], backend.quarantined)
             self.assertEqual(1, result.failure_count)
             self.assertIn("清理目录", result.items[0].message)
             self.assertTrue(replacement_path.exists())
@@ -172,10 +173,10 @@ class CleanupExecutorTests(unittest.TestCase):
         backend = RecordingRemovalBackend()
 
         result = CleanupExecutor(backend=backend).execute(
-            [forged], mode=CleanupMode.RECYCLE
+            [forged], mode=CleanupMode.QUARANTINE
         )
 
-        self.assertEqual([], backend.recycled)
+        self.assertEqual([], backend.quarantined)
         self.assertEqual(1, result.failure_count)
         self.assertIn("C 盘", result.items[0].message)
 
@@ -195,7 +196,7 @@ class CleanupExecutorTests(unittest.TestCase):
         )
 
         result = CleanupExecutor(backend=RecordingRemovalBackend()).execute(
-            [forged], mode=CleanupMode.RECYCLE
+            [forged], mode=CleanupMode.QUARANTINE
         )
 
         self.assertEqual(1, result.failure_count)
@@ -221,6 +222,55 @@ class CleanupExecutorTests(unittest.TestCase):
 
             self.assertTrue(reviewed.exists())
             self.assertTrue(moved.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_windows_quarantine_can_restore_the_exact_reviewed_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+
+            self.assertFalse(reviewed.exists())
+            entries = store.list_entries()
+            self.assertEqual(1, len(entries))
+            self.assertEqual(b"reviewed bytes", entries[0].stored_path.read_bytes())
+
+            store.restore(entries[0])
+
+            self.assertEqual(b"reviewed bytes", reviewed.read_bytes())
+            self.assertEqual([], store.list_entries())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_windows_quarantine_restore_never_overwrites_original_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = store.list_entries()[0]
+            reviewed.write_bytes(b"new occupant")
+
+            with self.assertRaises(FileExistsError):
+                store.restore(entry)
+
+            self.assertEqual(b"new occupant", reviewed.read_bytes())
+            self.assertEqual(b"reviewed bytes", entry.stored_path.read_bytes())
 
 
 if __name__ == "__main__":
