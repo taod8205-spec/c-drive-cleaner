@@ -181,7 +181,7 @@ class QuarantineStore:
     def list_entries(self) -> list[QuarantineEntry]:
         return self.inspect_entries().entries
 
-    def restore(self, entry: QuarantineEntry) -> None:
+    def restore(self, entry: QuarantineEntry) -> str | None:
         self._validate_entry_paths(entry)
         with DirectoryChainLock(entry.stored_path.parent):
             if not self._entry_directory_matches(entry):
@@ -196,13 +196,9 @@ class QuarantineStore:
                     rename_opened_file(handle, entry.original_path)
                 finally:
                     close_windows_handle(handle)
-                entry.manifest_path.unlink(missing_ok=True)
-                try:
-                    entry.manifest_path.parent.rmdir()
-                except OSError:
-                    pass
+                return self._cleanup_metadata(entry)
 
-    def permanently_delete(self, entry: QuarantineEntry) -> None:
+    def permanently_delete(self, entry: QuarantineEntry) -> str | None:
         if entry.risk is RiskLevel.HIGH:
             raise ValueError("高风险隔离项目禁止永久删除")
         self._validate_entry_paths(entry)
@@ -214,11 +210,7 @@ class QuarantineStore:
                 mark_opened_file_for_deletion(handle)
             finally:
                 close_windows_handle(handle)
-            entry.manifest_path.unlink(missing_ok=True)
-            try:
-                entry.manifest_path.parent.rmdir()
-            except OSError:
-                pass
+            return self._cleanup_metadata(entry)
 
     def _read_entry(self, entry_dir: Path) -> QuarantineEntry | None:
         manifest_path = entry_dir / "manifest.json"
@@ -240,7 +232,9 @@ class QuarantineStore:
             entry_dir_identity=DirectoryIdentity.from_stat(entry_dir_stat),
         )
         self._validate_entry_paths(entry)
-        return entry if entry.stored_path.is_file() else None
+        if not entry.stored_path.is_file():
+            raise FileNotFoundError("隔离清单存在，但 payload 文件缺失")
+        return entry
 
     def _validate_root(self) -> None:
         if (
@@ -291,6 +285,18 @@ class QuarantineStore:
             close_windows_handle(handle)
             raise
         return handle
+
+    @staticmethod
+    def _cleanup_metadata(entry: QuarantineEntry) -> str | None:
+        try:
+            entry.manifest_path.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"文件操作已完成，但隔离清单未能移除：{exc}"
+        try:
+            entry.manifest_path.parent.rmdir()
+        except OSError as exc:
+            return f"文件操作已完成，但空的隔离项目目录未能移除：{exc}"
+        return None
 
     @staticmethod
     def _entry_directory_matches(entry: QuarantineEntry) -> bool:

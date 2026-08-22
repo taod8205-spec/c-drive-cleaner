@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from cleaner.cleanup import CleanupExecutor, CleanupMode, WindowsRemovalBackend
 from cleaner.models import Candidate, DirectoryIdentity, FileFingerprint, RiskLevel
@@ -366,6 +367,34 @@ class CleanupExecutorTests(unittest.TestCase):
 
             self.assertTrue((moved_entry_dir / "payload").exists())
             self.assertFalse(reviewed.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_restore_reports_metadata_failure_after_the_file_is_restored(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = store.list_entries()[0]
+
+            with patch.object(
+                Path, "unlink", side_effect=PermissionError("metadata blocked")
+            ):
+                warning = store.restore(entry)
+
+            self.assertEqual(b"reviewed bytes", reviewed.read_bytes())
+            self.assertIn("文件操作已完成", warning or "")
+            report = store.inspect_entries()
+            self.assertEqual([], report.entries)
+            self.assertEqual(1, len(report.warnings))
+            self.assertIn("payload 文件缺失", report.warnings[0])
 
 
 if __name__ == "__main__":

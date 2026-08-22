@@ -632,7 +632,7 @@ class CleanerApp(tk.Tk):
         status = tk.StringVar()
         entries: dict[str, QuarantineEntry] = {}
 
-        def reload_entries() -> None:
+        def reload_entries(*, notify_warnings: bool = True) -> None:
             tree.delete(*tree.get_children())
             entries.clear()
             try:
@@ -662,7 +662,7 @@ class CleanerApp(tk.Tk):
             status.set(
                 f"共 {len(listed)} 项{warning_text}；本软件不会自动清空隔离区。"
             )
-            if report is not None and report.warnings:
+            if notify_warnings and report is not None and report.warnings:
                 preview = "\n".join(f"• {item}" for item in report.warnings[:5])
                 if len(report.warnings) > 5:
                     preview += f"\n……另有 {len(report.warnings) - 5} 条"
@@ -687,12 +687,17 @@ class CleanerApp(tk.Tk):
             ):
                 return
             try:
-                self.quarantine_store.restore(entry)
+                warning = self.quarantine_store.restore(entry)
             except (OSError, ValueError) as exc:
                 messagebox.showerror("恢复失败", str(exc), parent=window)
                 return
-            messagebox.showinfo("恢复完成", "文件已恢复到原路径。", parent=window)
-            reload_entries()
+            if warning:
+                messagebox.showwarning(
+                    "恢复已完成，但清单清理失败", warning, parent=window
+                )
+            else:
+                messagebox.showinfo("恢复完成", "文件已恢复到原路径。", parent=window)
+            reload_entries(notify_warnings=not bool(warning))
 
         def delete_selected() -> None:
             selection = tree.selection()
@@ -719,12 +724,19 @@ class CleanerApp(tk.Tk):
             if confirmation != "永久删除隔离项":
                 return
             try:
-                self.quarantine_store.permanently_delete(entry)
+                warning = self.quarantine_store.permanently_delete(entry)
             except (OSError, ValueError) as exc:
                 messagebox.showerror("永久删除失败", str(exc), parent=window)
                 return
-            messagebox.showinfo("永久删除完成", "隔离文件已永久删除。", parent=window)
-            reload_entries()
+            if warning:
+                messagebox.showwarning(
+                    "永久删除已完成，但清单清理失败", warning, parent=window
+                )
+            else:
+                messagebox.showinfo(
+                    "永久删除完成", "隔离文件已永久删除。", parent=window
+                )
+            reload_entries(notify_warnings=not bool(warning))
 
         ttk.Button(side, text="恢复所选项", command=restore_selected).pack(fill="x")
         ttk.Button(side, text="永久删除所选项", command=delete_selected).pack(
