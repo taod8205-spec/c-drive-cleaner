@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -271,6 +272,100 @@ class CleanupExecutorTests(unittest.TestCase):
 
             self.assertEqual(b"new occupant", reviewed.read_bytes())
             self.assertEqual(b"reviewed bytes", entry.stored_path.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_windows_quarantine_permanent_delete_requires_a_non_high_risk_entry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = store.list_entries()[0]
+
+            store.permanently_delete(entry)
+
+            self.assertFalse(entry.stored_path.exists())
+            self.assertEqual([], store.list_entries())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_quarantine_store_never_permanently_deletes_high_risk(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = replace(store.list_entries()[0], risk=RiskLevel.HIGH)
+
+            with self.assertRaises(ValueError):
+                store.permanently_delete(entry)
+
+            self.assertTrue(entry.stored_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_quarantine_inspection_reports_a_corrupt_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = store.list_entries()[0]
+            entry.manifest_path.write_text(
+                '{"fingerprint": []}', encoding="utf-8"
+            )
+
+            report = store.inspect_entries()
+
+            self.assertEqual([], report.entries)
+            self.assertEqual(1, len(report.warnings))
+            self.assertTrue(entry.stored_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_quarantine_restore_rejects_a_replaced_entry_directory(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = store.list_entries()[0]
+            moved_entry_dir = entry.stored_path.parent.with_name("moved-entry")
+            entry.stored_path.parent.rename(moved_entry_dir)
+            entry.stored_path.parent.mkdir()
+
+            with self.assertRaises(OSError):
+                store.restore(entry)
+
+            self.assertTrue((moved_entry_dir / "payload").exists())
+            self.assertFalse(reviewed.exists())
 
 
 if __name__ == "__main__":

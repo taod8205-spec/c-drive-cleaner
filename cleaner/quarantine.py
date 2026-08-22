@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import uuid
 from collections.abc import Mapping
@@ -18,6 +17,7 @@ from .safety import (
     close_windows_handle,
     get_opened_file_identity,
     is_reparse_point,
+    mark_opened_file_for_deletion,
     open_exact_windows_file,
     rename_opened_file,
 )
@@ -36,6 +36,12 @@ class QuarantineEntry:
     reason: str
     fingerprint: FileFingerprint
     entry_dir_identity: DirectoryIdentity
+
+
+@dataclass(slots=True)
+class QuarantineReport:
+    entries: list[QuarantineEntry]
+    warnings: list[str]
 
 
 class QuarantineStore:
@@ -91,12 +97,15 @@ class QuarantineStore:
                 "fingerprint": asdict(entry.fingerprint),
             }
             try:
-                with entry.manifest_path.open("x", encoding="utf-8") as handle:
-                    json.dump(payload, handle, ensure_ascii=False, indent=2)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                with DirectoryChainLock(entry_dir):
+                    if not self._entry_directory_matches(entry):
+                        raise ExactFileError("隔离目录在创建后已发生变化")
+                    with entry.manifest_path.open("x", encoding="utf-8") as handle:
+                        json.dump(payload, handle, ensure_ascii=False, indent=2)
+                        handle.flush()
+                        os.fsync(handle.fileno())
             except Exception:
-                shutil.rmtree(entry_dir, ignore_errors=True)
+                self.discard_prepared(entry)
                 raise
             return entry
 
@@ -122,28 +131,55 @@ class QuarantineStore:
                 raise FileExistsError(f"隔离目标已存在：{entry.stored_path}")
             rename_opened_file(handle, entry.stored_path)
 
-    def list_entries(self) -> list[QuarantineEntry]:
+    def inspect_entries(self) -> QuarantineReport:
+        self._validate_root()
         try:
-            self._validate_root()
-            with DirectoryChainLock(self.root):
-                entries: list[QuarantineEntry] = []
-                with os.scandir(self.root) as directories:
-                    for directory in directories:
-                        try:
-                            directory_stat = directory.stat(follow_symlinks=False)
+            root_stat = os.stat(self.root, follow_symlinks=False)
+        except FileNotFoundError:
+            return QuarantineReport([], [])
+        if not stat.S_ISDIR(root_stat.st_mode) or is_reparse_point(root_stat):
+            raise DirectoryLockError("安全隔离区不是普通目录")
+
+        entries: list[QuarantineEntry] = []
+        warnings: list[str] = []
+        with DirectoryChainLock(self.root):
+            with os.scandir(self.root) as directories:
+                for directory in directories:
+                    entry_dir = Path(directory.path)
+                    try:
+                        directory_stat = os.stat(
+                            directory.path, follow_symlinks=False
+                        )
+                        if (
+                            not stat.S_ISDIR(directory_stat.st_mode)
+                            or is_reparse_point(directory_stat)
+                        ):
+                            raise ValueError("项目目录是链接、重解析点或非目录")
+                        expected_identity = DirectoryIdentity.from_stat(directory_stat)
+                        with DirectoryChainLock(entry_dir):
+                            current_stat = entry_dir.stat(follow_symlinks=False)
                             if (
-                                not is_reparse_point(directory_stat)
-                                and directory.is_dir(follow_symlinks=False)
+                                DirectoryIdentity.from_stat(current_stat)
+                                != expected_identity
                             ):
-                                entry = self._read_entry(Path(directory.path))
-                                if entry is not None:
-                                    entries.append(entry)
-                        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-                            continue
-                entries.sort(key=lambda item: item.quarantined_at, reverse=True)
-                return entries
-        except (FileNotFoundError, DirectoryLockError, OSError):
-            return []
+                                raise ExactFileError("项目目录在读取前已发生变化")
+                            entry = self._read_entry(entry_dir)
+                        if entry is not None:
+                            entries.append(entry)
+                    except (
+                        OSError,
+                        ValueError,
+                        KeyError,
+                        TypeError,
+                        OverflowError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        warnings.append(f"无法读取隔离项目 {entry_dir}：{exc}")
+        entries.sort(key=lambda item: item.quarantined_at, reverse=True)
+        return QuarantineReport(entries, warnings)
+
+    def list_entries(self) -> list[QuarantineEntry]:
+        return self.inspect_entries().entries
 
     def restore(self, entry: QuarantineEntry) -> None:
         self._validate_entry_paths(entry)
@@ -155,16 +191,8 @@ class QuarantineStore:
                     raise FileExistsError(
                         f"原路径已有文件，已拒绝覆盖：{entry.original_path}"
                     )
-                handle = open_exact_windows_file(entry.stored_path)
+                handle = self._open_verified_entry(entry)
                 try:
-                    identity = get_opened_file_identity(handle)
-                    fingerprint = entry.fingerprint
-                    if identity.is_reparse_point or (
-                        identity.size != fingerprint.size
-                        or identity.modified_ns != fingerprint.modified_ns
-                        or identity.file_index != fingerprint.inode
-                    ):
-                        raise ExactFileError("隔离文件身份与清单不一致，已拒绝恢复")
                     rename_opened_file(handle, entry.original_path)
                 finally:
                     close_windows_handle(handle)
@@ -173,6 +201,24 @@ class QuarantineStore:
                     entry.manifest_path.parent.rmdir()
                 except OSError:
                     pass
+
+    def permanently_delete(self, entry: QuarantineEntry) -> None:
+        if entry.risk is RiskLevel.HIGH:
+            raise ValueError("高风险隔离项目禁止永久删除")
+        self._validate_entry_paths(entry)
+        with DirectoryChainLock(entry.stored_path.parent):
+            if not self._entry_directory_matches(entry):
+                raise ExactFileError("隔离目录在列出后已发生变化")
+            handle = self._open_verified_entry(entry)
+            try:
+                mark_opened_file_for_deletion(handle)
+            finally:
+                close_windows_handle(handle)
+            entry.manifest_path.unlink(missing_ok=True)
+            try:
+                entry.manifest_path.parent.rmdir()
+            except OSError:
+                pass
 
     def _read_entry(self, entry_dir: Path) -> QuarantineEntry | None:
         manifest_path = entry_dir / "manifest.json"
@@ -228,6 +274,23 @@ class QuarantineStore:
         if stat.S_ISREG(stored_stat.st_mode) and not is_reparse_point(stored_stat):
             return
         raise ValueError("隔离文件是链接或重解析点")
+
+    @staticmethod
+    def _open_verified_entry(entry: QuarantineEntry) -> int:
+        handle = open_exact_windows_file(entry.stored_path)
+        try:
+            identity = get_opened_file_identity(handle)
+            fingerprint = entry.fingerprint
+            if identity.is_reparse_point or (
+                identity.size != fingerprint.size
+                or identity.modified_ns != fingerprint.modified_ns
+                or identity.file_index != fingerprint.inode
+            ):
+                raise ExactFileError("隔离文件身份与清单不一致")
+        except Exception:
+            close_windows_handle(handle)
+            raise
+        return handle
 
     @staticmethod
     def _entry_directory_matches(entry: QuarantineEntry) -> bool:

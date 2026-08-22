@@ -636,10 +636,12 @@ class CleanerApp(tk.Tk):
             tree.delete(*tree.get_children())
             entries.clear()
             try:
-                listed = self.quarantine_store.list_entries()
-            except ValueError as exc:
+                report = self.quarantine_store.inspect_entries()
+                listed = report.entries
+            except (OSError, ValueError) as exc:
                 messagebox.showerror("无法读取隔离区", str(exc), parent=window)
                 listed = []
+                report = None
             for entry in listed:
                 entries[entry.entry_id] = entry
                 tree.insert(
@@ -655,7 +657,20 @@ class CleanerApp(tk.Tk):
                     ),
                     tags=(_risk_tag(entry.risk),),
                 )
-            status.set(f"共 {len(listed)} 项；本软件不会自动清空隔离区。")
+            warning_count = len(report.warnings) if report is not None else 0
+            warning_text = f"；{warning_count} 个异常项目已保留" if warning_count else ""
+            status.set(
+                f"共 {len(listed)} 项{warning_text}；本软件不会自动清空隔离区。"
+            )
+            if report is not None and report.warnings:
+                preview = "\n".join(f"• {item}" for item in report.warnings[:5])
+                if len(report.warnings) > 5:
+                    preview += f"\n……另有 {len(report.warnings) - 5} 条"
+                messagebox.showwarning(
+                    "部分隔离项目无法读取",
+                    "异常项目已原样保留，没有执行任何文件操作：\n\n" + preview,
+                    parent=window,
+                )
 
         def restore_selected() -> None:
             selection = tree.selection()
@@ -679,7 +694,42 @@ class CleanerApp(tk.Tk):
             messagebox.showinfo("恢复完成", "文件已恢复到原路径。", parent=window)
             reload_entries()
 
+        def delete_selected() -> None:
+            selection = tree.selection()
+            if not selection or selection[0] not in entries:
+                messagebox.showinfo(
+                    "请选择项目", "请先选择一个隔离项目。", parent=window
+                )
+                return
+            entry = entries[selection[0]]
+            if entry.risk is RiskLevel.HIGH:
+                messagebox.showerror(
+                    "已阻止永久删除",
+                    "高风险隔离项目禁止永久删除；如不需要，请恢复后继续保留。",
+                    parent=window,
+                )
+                return
+            confirmation = simpledialog.askstring(
+                "确认永久删除隔离项",
+                f"将永久删除以下隔离文件并释放对应空间，无法恢复：\n\n"
+                f"{entry.original_path}\n{format_size(entry.size_bytes)} · "
+                f"{entry.risk.label}风险\n\n请输入“永久删除隔离项”继续：",
+                parent=window,
+            )
+            if confirmation != "永久删除隔离项":
+                return
+            try:
+                self.quarantine_store.permanently_delete(entry)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("永久删除失败", str(exc), parent=window)
+                return
+            messagebox.showinfo("永久删除完成", "隔离文件已永久删除。", parent=window)
+            reload_entries()
+
         ttk.Button(side, text="恢复所选项", command=restore_selected).pack(fill="x")
+        ttk.Button(side, text="永久删除所选项", command=delete_selected).pack(
+            fill="x", pady=(8, 0)
+        )
         ttk.Button(side, text="刷新", command=reload_entries).pack(
             fill="x", pady=(8, 0)
         )
