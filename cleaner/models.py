@@ -61,10 +61,21 @@ class FileFingerprint:
 
 
 @dataclass(frozen=True, slots=True)
+class DirectoryIdentity:
+    device: int
+    inode: int
+
+    @classmethod
+    def from_stat(cls, value: Any) -> DirectoryIdentity:
+        return cls(device=value.st_dev, inode=value.st_ino)
+
+
+@dataclass(frozen=True, slots=True)
 class Candidate:
     candidate_id: str
     path: Path
     source_root: Path
+    source_root_identity: DirectoryIdentity
     rule_id: str
     category: str
     size_bytes: int

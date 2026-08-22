@@ -11,6 +11,7 @@ from .models import (
     Candidate,
     CleanupItemResult,
     CleanupResult,
+    DirectoryIdentity,
     FileFingerprint,
     RiskLevel,
 )
@@ -79,9 +80,11 @@ class CleanupExecutor:
         *,
         backend: RemovalBackend | None = None,
         protected_roots: tuple[Path, ...] = (),
+        allowed_drive: str = "C:",
     ) -> None:
         self._backend = backend or WindowsRemovalBackend()
         self._protected_roots = tuple(Path(path) for path in protected_roots)
+        self._allowed_drive = allowed_drive.rstrip("\\/").casefold()
 
     def execute(
         self, candidates: list[Candidate], *, mode: CleanupMode
@@ -124,6 +127,11 @@ class CleanupExecutor:
         return result
 
     def _validate(self, candidate: Candidate) -> str | None:
+        if (
+            candidate.path.drive.casefold() != self._allowed_drive
+            or candidate.source_root.drive.casefold() != self._allowed_drive
+        ):
+            return "只允许清理 C 盘内的候选文件"
         if not _is_descendant(candidate.path, candidate.source_root):
             return "路径不在允许的清理目录内"
         if any(
@@ -131,6 +139,33 @@ class CleanupExecutor:
             for root in self._protected_roots
         ):
             return "路径位于受保护目录内"
+        try:
+            source_stat = candidate.source_root.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return "允许的清理目录已不存在"
+        except OSError as exc:
+            return f"无法重新验证清理目录：{exc}"
+        if not stat.S_ISDIR(source_stat.st_mode):
+            return "允许的清理目录类型已改变"
+        if stat.S_ISLNK(source_stat.st_mode) or _is_reparse_point(source_stat):
+            return "允许的清理目录变成了链接或重解析点"
+        if DirectoryIdentity.from_stat(source_stat) != candidate.source_root_identity:
+            return "允许的清理目录在扫描后已被替换"
+
+        normalized_path = Path(os.path.abspath(candidate.path))
+        normalized_root = Path(os.path.abspath(candidate.source_root))
+        relative_path = normalized_path.relative_to(normalized_root)
+        current_parent = normalized_root
+        for part in relative_path.parts[:-1]:
+            current_parent /= part
+            try:
+                parent_stat = current_parent.stat(follow_symlinks=False)
+            except OSError as exc:
+                return f"无法重新验证父目录：{exc}"
+            if not stat.S_ISDIR(parent_stat.st_mode):
+                return "候选文件的父目录类型已改变"
+            if stat.S_ISLNK(parent_stat.st_mode) or _is_reparse_point(parent_stat):
+                return "候选文件的父目录变成了链接或重解析点"
         try:
             current_stat = candidate.path.stat(follow_symlinks=False)
         except FileNotFoundError:

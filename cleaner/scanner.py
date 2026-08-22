@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .models import Candidate, FileFingerprint, ScanReport, ScanRule
+from .models import Candidate, DirectoryIdentity, FileFingerprint, ScanReport, ScanRule
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
@@ -75,6 +75,7 @@ class CleanupScanner:
             return
 
         cutoff = current_time - timedelta(days=rule.min_age_days)
+        source_root_identity = DirectoryIdentity.from_stat(root_stat)
         for path, path_stat in self._walk_files(rule, report):
             report.scanned_files += 1
             modified_at = datetime.fromtimestamp(path_stat.st_mtime, UTC)
@@ -90,6 +91,7 @@ class CleanupScanner:
                     candidate_id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
                     path=path,
                     source_root=root,
+                    source_root_identity=source_root_identity,
                     rule_id=rule.rule_id,
                     category=rule.category,
                     size_bytes=path_stat.st_size,
@@ -109,6 +111,17 @@ class CleanupScanner:
         while pending:
             directory = pending.pop()
             try:
+                directory_stat = directory.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(directory_stat.st_mode):
+                    report.warnings.append(f"扫描期间目录类型已改变，已跳过：{directory}")
+                    continue
+                if stat.S_ISLNK(directory_stat.st_mode) or _is_reparse_point(
+                    directory_stat
+                ):
+                    report.warnings.append(
+                        f"扫描期间检测到链接或重解析点，已跳过：{directory}"
+                    )
+                    continue
                 with os.scandir(directory) as entries:
                     for entry in entries:
                         path = Path(entry.path)

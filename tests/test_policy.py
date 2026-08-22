@@ -73,6 +73,20 @@ class DefaultPolicyTests(unittest.TestCase):
         )
         self.assertIn(str(Path(r"C:\Program Files")).casefold(), protected)
 
+    def test_policy_never_switches_away_from_c_with_system_drive(self) -> None:
+        environment = {
+            "SystemDrive": "D:",
+            "WINDIR": r"D:\Windows",
+            "LOCALAPPDATA": r"D:\Users\Reviewer\AppData\Local",
+            "ProgramData": r"D:\ProgramData",
+            "USERPROFILE": r"D:\Users\Reviewer",
+        }
+
+        policy = build_default_policy(environment, discover_browser_profiles=False)
+
+        self.assertEqual("C:", policy.system_drive)
+        self.assertTrue(all(rule.root.drive.casefold() == "c:" for rule in policy.rules))
+
 
 if __name__ == "__main__":
     unittest.main()

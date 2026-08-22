@@ -6,10 +6,11 @@ import subprocess
 import threading
 import tkinter as tk
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import cast
+from typing import TypeAlias
 
 from .cleanup import CleanupExecutor, CleanupMode
 from .models import Candidate, CleanupResult, RiskLevel, ScanReport
@@ -53,6 +54,32 @@ def _risk_tag(risk: RiskLevel) -> str:
     }[risk]
 
 
+@dataclass(frozen=True, slots=True)
+class _ScanCompletedEvent:
+    report: ScanReport
+
+
+@dataclass(frozen=True, slots=True)
+class _ScanFailedEvent:
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupCompletedEvent:
+    result: CleanupResult
+    mode: CleanupMode
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupFailedEvent:
+    message: str
+
+
+_WorkerEvent: TypeAlias = (
+    _ScanCompletedEvent | _ScanFailedEvent | _CleanupCompletedEvent | _CleanupFailedEvent
+)
+
+
 class CleanerApp(tk.Tk):
     def __init__(self, policy: CleanupPolicy | None = None) -> None:
         super().__init__()
@@ -61,7 +88,7 @@ class CleanerApp(tk.Tk):
         self.selected_ids: set[str] = set()
         self.last_warnings: list[str] = []
         self._busy = False
-        self._worker_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._worker_events: queue.Queue[_WorkerEvent] = queue.Queue()
 
         self.title("慎清 · C 盘清理审查器")
         self.geometry("1240x800")
@@ -340,23 +367,24 @@ class CleanerApp(tk.Tk):
             try:
                 report = CleanupScanner(self.policy.rules).scan()
             except Exception as exc:  # UI boundary: always restore controls.
-                self._worker_events.put(("scan_failed", str(exc)))
+                self._worker_events.put(_ScanFailedEvent(str(exc)))
                 return
-            self._worker_events.put(("scan_completed", report))
+            self._worker_events.put(_ScanCompletedEvent(report))
 
         threading.Thread(target=worker, daemon=True, name="conservative-scan").start()
 
     def _drain_worker_events(self) -> None:
         try:
             while True:
-                event_name, payload = self._worker_events.get_nowait()
-                if event_name == "scan_completed":
-                    self._scan_completed(cast(ScanReport, payload))
-                elif event_name == "scan_failed":
-                    self._scan_failed(str(payload))
-                elif event_name == "cleanup_completed":
-                    result, mode = cast(tuple[CleanupResult, CleanupMode], payload)
-                    self._cleanup_completed(result, mode)
+                event = self._worker_events.get_nowait()
+                if isinstance(event, _ScanCompletedEvent):
+                    self._scan_completed(event.report)
+                elif isinstance(event, _ScanFailedEvent):
+                    self._scan_failed(event.message)
+                elif isinstance(event, _CleanupCompletedEvent):
+                    self._cleanup_completed(event.result, event.mode)
+                elif isinstance(event, _CleanupFailedEvent):
+                    self._cleanup_failed(event.message)
         except queue.Empty:
             pass
         if self.winfo_exists():
@@ -605,11 +633,22 @@ class CleanerApp(tk.Tk):
         self._set_busy(True, f"正在处理 {len(selected)} 个已审查项目……")
 
         def worker() -> None:
-            executor = CleanupExecutor(protected_roots=self.policy.protected_roots)
-            result = executor.execute(selected, mode=mode)
-            self._worker_events.put(("cleanup_completed", (result, mode)))
+            executor = CleanupExecutor(
+                protected_roots=self.policy.protected_roots,
+                allowed_drive=self.policy.system_drive,
+            )
+            try:
+                result = executor.execute(selected, mode=mode)
+            except Exception as exc:  # UI boundary: preserve selection for retry.
+                self._worker_events.put(_CleanupFailedEvent(str(exc)))
+                return
+            self._worker_events.put(_CleanupCompletedEvent(result, mode))
 
         threading.Thread(target=worker, daemon=True, name="conservative-cleanup").start()
+
+    def _cleanup_failed(self, message: str) -> None:
+        self._set_busy(False, "清理未完成；所有未确认成功的项目均保持勾选。")
+        messagebox.showerror("清理失败", message, parent=self)
 
     def _cleanup_completed(self, result: CleanupResult, mode: CleanupMode) -> None:
         succeeded = {

@@ -75,8 +75,8 @@ def build_default_policy(
 ) -> CleanupPolicy:
     """构建只覆盖明确缓存位置的保守策略，不枚举个人资料目录。"""
 
-    env = environment or os.environ
-    system_drive = (env.get("SystemDrive") or "C:").rstrip("\\/")
+    env = environment if environment is not None else os.environ
+    system_drive = "C:"
     windir = _path(env, "WINDIR", f"{system_drive}\\Windows")
     local_app_data = _path(
         env, "LOCALAPPDATA", f"{system_drive}\\Users\\Default\\AppData\\Local"
