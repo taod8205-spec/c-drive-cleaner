@@ -59,11 +59,13 @@ class WindowsRemovalBackend:
             raise RuntimeError("安全隔离仅支持 Windows")
 
         handle = self._open_verified_candidate(candidate)
-        entry = self._quarantine_store.prepare(candidate)
+        entry = None
         try:
+            entry = self._quarantine_store.prepare(candidate)
             self._quarantine_store.commit(entry, handle)
         except Exception:
-            self._quarantine_store.discard_prepared(entry)
+            if entry is not None:
+                self._quarantine_store.discard_prepared(entry)
             raise
         finally:
             close_windows_handle(handle)

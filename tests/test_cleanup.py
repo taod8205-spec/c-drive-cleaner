@@ -1,10 +1,11 @@
+import json
 import os
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cleaner.cleanup import CleanupExecutor, CleanupMode, WindowsRemovalBackend
 from cleaner.models import Candidate, DirectoryIdentity, FileFingerprint, RiskLevel
@@ -225,6 +226,27 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertTrue(reviewed.exists())
             self.assertTrue(moved.exists())
 
+    @unittest.skipUnless(os.name == "nt", "Windows 句柄接口测试")
+    def test_windows_backend_closes_handle_when_quarantine_prepare_fails(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            reviewed = root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            candidate = candidate_for(reviewed, root)
+            store = Mock(spec=QuarantineStore)
+            store.prepare.side_effect = PermissionError("blocked")
+            backend = WindowsRemovalBackend(store)
+
+            with (
+                patch.object(backend, "_open_verified_candidate", return_value=987),
+                patch("cleaner.cleanup.close_windows_handle") as close_handle,
+                self.assertRaises(PermissionError),
+            ):
+                backend.quarantine(candidate)
+
+            close_handle.assert_called_once_with(987)
+            store.discard_prepared.assert_not_called()
+
     @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
     def test_windows_quarantine_can_restore_the_exact_reviewed_file(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
@@ -395,6 +417,42 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertEqual([], report.entries)
             self.assertEqual(1, len(report.warnings))
             self.assertIn("payload 文件缺失", report.warnings[0])
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_quarantine_inspection_rejects_unsafe_manifest_values(self) -> None:
+        unsafe_values = (
+            ("quarantined_at", "2026-08-22T12:00:00"),
+            ("size_bytes", 10**400),
+        )
+        for field, value in unsafe_values:
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+                    base = Path(temp_dir)
+                    source_root = base / "source"
+                    source_root.mkdir()
+                    reviewed = source_root / "reviewed.tmp"
+                    reviewed.write_bytes(b"reviewed bytes")
+                    app_data = base / "appdata"
+                    app_data.mkdir()
+                    store = QuarantineStore(
+                        app_data / "慎清" / "Quarantine",
+                        allowed_drive=base.drive,
+                    )
+                    WindowsRemovalBackend(store).quarantine(
+                        candidate_for(reviewed, source_root)
+                    )
+                    entry = store.list_entries()[0]
+                    payload = json.loads(entry.manifest_path.read_text(encoding="utf-8"))
+                    payload[field] = value
+                    entry.manifest_path.write_text(
+                        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                    )
+
+                    report = store.inspect_entries()
+
+                    self.assertEqual([], report.entries)
+                    self.assertEqual(1, len(report.warnings))
+                    self.assertTrue(entry.stored_path.exists())
 
 
 if __name__ == "__main__":

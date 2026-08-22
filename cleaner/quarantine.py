@@ -212,22 +212,68 @@ class QuarantineStore:
                 close_windows_handle(handle)
             return self._cleanup_metadata(entry)
 
-    def _read_entry(self, entry_dir: Path) -> QuarantineEntry | None:
+    def _read_entry(self, entry_dir: Path) -> QuarantineEntry:
         manifest_path = entry_dir / "manifest.json"
+        manifest_stat = os.stat(manifest_path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(manifest_stat.st_mode)
+            or is_reparse_point(manifest_stat)
+            or manifest_stat.st_size > 65_536
+        ):
+            raise ValueError("隔离清单不是普通小型文件")
         with manifest_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        fingerprint = FileFingerprint(**payload["fingerprint"])
+        if (
+            not isinstance(payload, Mapping)
+            or type(payload.get("version")) is not int
+            or payload.get("version") != 1
+        ):
+            raise ValueError("隔离清单格式或版本无效")
+        fingerprint_payload = payload["fingerprint"]
+        if not isinstance(fingerprint_payload, Mapping):
+            raise TypeError("隔离清单中的文件身份格式无效")
+        fingerprint_values = {
+            name: fingerprint_payload[name]
+            for name in ("size", "modified_ns", "device", "inode")
+        }
+        if any(type(value) is not int for value in fingerprint_values.values()):
+            raise TypeError("隔离清单中的文件身份必须是整数")
+        if (
+            fingerprint_values["size"] < 0
+            or fingerprint_values["modified_ns"] < 0
+            or fingerprint_values["device"] < 0
+            or fingerprint_values["inode"] <= 0
+        ):
+            raise ValueError("隔离清单中的文件身份超出有效范围")
+        fingerprint = FileFingerprint(**fingerprint_values)
+        size_bytes = payload["size_bytes"]
+        if type(size_bytes) is not int or not 0 <= size_bytes <= (2**63 - 1):
+            raise ValueError("隔离清单中的文件大小超出有效范围")
+        if size_bytes != fingerprint.size:
+            raise ValueError("隔离清单中的文件大小与身份不一致")
+        timestamp = payload["quarantined_at"]
+        if not isinstance(timestamp, str):
+            raise TypeError("隔离时间必须是带时区的文本")
+        quarantined_at = datetime.fromisoformat(timestamp)
+        if quarantined_at.tzinfo is None or quarantined_at.utcoffset() is None:
+            raise ValueError("隔离时间缺少时区")
+        for field in ("entry_id", "original_path", "stored_path", "category", "reason"):
+            if not isinstance(payload[field], str):
+                raise TypeError(f"隔离清单字段 {field} 必须是文本")
+        risk_value = payload["risk"]
+        if type(risk_value) is not int:
+            raise TypeError("隔离清单中的风险等级必须是整数")
         entry_dir_stat = entry_dir.stat(follow_symlinks=False)
         entry = QuarantineEntry(
-            entry_id=str(payload["entry_id"]),
+            entry_id=payload["entry_id"],
             original_path=Path(payload["original_path"]),
             stored_path=Path(payload["stored_path"]),
             manifest_path=manifest_path,
-            quarantined_at=datetime.fromisoformat(payload["quarantined_at"]),
-            size_bytes=int(payload["size_bytes"]),
-            category=str(payload["category"]),
-            risk=RiskLevel(int(payload["risk"])),
-            reason=str(payload["reason"]),
+            quarantined_at=quarantined_at,
+            size_bytes=size_bytes,
+            category=payload["category"],
+            risk=RiskLevel(risk_value),
+            reason=payload["reason"],
             fingerprint=fingerprint,
             entry_dir_identity=DirectoryIdentity.from_stat(entry_dir_stat),
         )
