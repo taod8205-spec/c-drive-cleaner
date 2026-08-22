@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import queue
 import subprocess
 import threading
 import tkinter as tk
@@ -8,6 +9,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from typing import cast
 
 from .cleanup import CleanupExecutor, CleanupMode
 from .models import Candidate, CleanupResult, RiskLevel, ScanReport
@@ -59,6 +61,7 @@ class CleanerApp(tk.Tk):
         self.selected_ids: set[str] = set()
         self.last_warnings: list[str] = []
         self._busy = False
+        self._worker_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.title("慎清 · C 盘清理审查器")
         self.geometry("1240x800")
@@ -68,6 +71,7 @@ class CleanerApp(tk.Tk):
 
         self._configure_styles()
         self._build_layout()
+        self.after(50, self._drain_worker_events)
         self.after(250, self.start_scan)
 
     def _configure_styles(self) -> None:
@@ -336,12 +340,27 @@ class CleanerApp(tk.Tk):
             try:
                 report = CleanupScanner(self.policy.rules).scan()
             except Exception as exc:  # UI boundary: always restore controls.
-                error_message = str(exc)
-                self.after(0, lambda: self._scan_failed(error_message))
+                self._worker_events.put(("scan_failed", str(exc)))
                 return
-            self.after(0, lambda: self._scan_completed(report))
+            self._worker_events.put(("scan_completed", report))
 
         threading.Thread(target=worker, daemon=True, name="conservative-scan").start()
+
+    def _drain_worker_events(self) -> None:
+        try:
+            while True:
+                event_name, payload = self._worker_events.get_nowait()
+                if event_name == "scan_completed":
+                    self._scan_completed(cast(ScanReport, payload))
+                elif event_name == "scan_failed":
+                    self._scan_failed(str(payload))
+                elif event_name == "cleanup_completed":
+                    result, mode = cast(tuple[CleanupResult, CleanupMode], payload)
+                    self._cleanup_completed(result, mode)
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(50, self._drain_worker_events)
 
     def _scan_completed(self, report: ScanReport) -> None:
         self.candidates = {item.candidate_id: item for item in report.candidates}
@@ -588,7 +607,7 @@ class CleanerApp(tk.Tk):
         def worker() -> None:
             executor = CleanupExecutor(protected_roots=self.policy.protected_roots)
             result = executor.execute(selected, mode=mode)
-            self.after(0, lambda: self._cleanup_completed(result, mode))
+            self._worker_events.put(("cleanup_completed", (result, mode)))
 
         threading.Thread(target=worker, daemon=True, name="conservative-cleanup").start()
 
