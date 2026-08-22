@@ -10,7 +10,7 @@ from cleaner.scanner import CleanupScanner
 
 class CleanupScannerTests(unittest.TestCase):
     def test_scan_lists_only_old_files_with_risk_context(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
             old_file = root / "old-cache.tmp"
             old_file.write_bytes(b"old cache")
@@ -32,7 +32,9 @@ class CleanupScannerTests(unittest.TestCase):
                 reason="超过 7 天的可重建测试缓存",
             )
 
-            report = CleanupScanner([rule], now=lambda: now).scan()
+            report = CleanupScanner(
+                [rule], now=lambda: now, allowed_drive=root.drive
+            ).scan()
 
             self.assertEqual([old_file], [item.path for item in report.candidates])
             self.assertEqual("低", report.candidates[0].risk.label)
@@ -41,7 +43,7 @@ class CleanupScannerTests(unittest.TestCase):
             self.assertEqual([], report.warnings)
 
     def test_scan_never_follows_symbolic_links(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             base = Path(temp_dir)
             root = base / "root"
             root.mkdir()
@@ -68,7 +70,9 @@ class CleanupScannerTests(unittest.TestCase):
                 reason="测试",
             )
 
-            report = CleanupScanner([rule], now=lambda: now).scan()
+            report = CleanupScanner(
+                [rule], now=lambda: now, allowed_drive=root.drive
+            ).scan()
 
             self.assertEqual([], report.candidates)
             self.assertTrue(any("链接" in warning for warning in report.warnings))

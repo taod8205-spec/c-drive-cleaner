@@ -20,7 +20,11 @@ def _path(environment: Mapping[str, str], name: str, fallback: str) -> Path:
 
 
 def _on_drive(path: Path, drive: str) -> bool:
-    return bool(path.drive) and path.drive.rstrip("\\/").casefold() == drive.casefold()
+    return (
+        path.is_absolute()
+        and bool(path.anchor)
+        and path.drive.rstrip("\\/").casefold() == drive.casefold()
+    )
 
 
 def _browser_rules(

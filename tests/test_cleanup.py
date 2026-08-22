@@ -39,14 +39,14 @@ def candidate_for(path: Path, source_root: Path) -> Candidate:
 
 class CleanupExecutorTests(unittest.TestCase):
     def test_execute_processes_only_explicitly_reviewed_candidates(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
             selected = root / "selected.tmp"
             selected.write_bytes(b"selected")
             unselected = root / "unselected.tmp"
             unselected.write_bytes(b"unselected")
             backend = RecordingRemovalBackend()
-            executor = CleanupExecutor(backend=backend)
+            executor = CleanupExecutor(backend=backend, allowed_drive=root.drive)
 
             result = executor.execute(
                 [candidate_for(selected, root)], mode=CleanupMode.RECYCLE
@@ -59,14 +59,14 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertTrue(unselected.exists())
 
     def test_execute_rejects_a_candidate_outside_its_approved_source(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             base = Path(temp_dir)
             approved_root = base / "approved"
             approved_root.mkdir()
             outside = base / "outside.tmp"
             outside.write_bytes(b"keep")
             backend = RecordingRemovalBackend()
-            executor = CleanupExecutor(backend=backend)
+            executor = CleanupExecutor(backend=backend, allowed_drive=base.drive)
 
             result = executor.execute(
                 [candidate_for(outside, approved_root)], mode=CleanupMode.RECYCLE
@@ -78,7 +78,7 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertTrue(outside.exists())
 
     def test_execute_rejects_a_file_changed_since_scan(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
             changed = root / "changed.tmp"
             changed.write_bytes(b"before")
@@ -88,7 +88,7 @@ class CleanupExecutorTests(unittest.TestCase):
             # Ensure filesystems with coarse timestamps also expose a changed size.
             self.assertNotEqual(candidate.size_bytes, changed.stat().st_size)
             backend = RecordingRemovalBackend()
-            executor = CleanupExecutor(backend=backend)
+            executor = CleanupExecutor(backend=backend, allowed_drive=root.drive)
 
             result = executor.execute([candidate], mode=CleanupMode.PERMANENT)
 
@@ -98,16 +98,16 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertTrue(changed.exists())
 
     def test_execute_never_permanently_deletes_high_risk_candidates(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
             sensitive = root / "diagnostic.dmp"
             sensitive.write_bytes(b"diagnostic evidence")
             low_risk_candidate = candidate_for(sensitive, root)
             high_risk_candidate = Candidate(
                 candidate_id=low_risk_candidate.candidate_id,
-            path=low_risk_candidate.path,
-            source_root=low_risk_candidate.source_root,
-            source_root_identity=low_risk_candidate.source_root_identity,
+                path=low_risk_candidate.path,
+                source_root=low_risk_candidate.source_root,
+                source_root_identity=low_risk_candidate.source_root_identity,
                 rule_id=low_risk_candidate.rule_id,
                 category=low_risk_candidate.category,
                 size_bytes=low_risk_candidate.size_bytes,
@@ -129,7 +129,7 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertTrue(sensitive.exists())
 
     def test_execute_rejects_a_replaced_source_root_even_if_file_is_unchanged(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             base = Path(temp_dir)
             root = base / "approved"
             root.mkdir()
@@ -146,7 +146,7 @@ class CleanupExecutorTests(unittest.TestCase):
             os.link(holding_link, replacement_path)
             backend = RecordingRemovalBackend()
 
-            result = CleanupExecutor(backend=backend).execute(
+            result = CleanupExecutor(backend=backend, allowed_drive=base.drive).execute(
                 [candidate], mode=CleanupMode.RECYCLE
             )
 
@@ -178,6 +178,28 @@ class CleanupExecutorTests(unittest.TestCase):
         self.assertEqual([], backend.recycled)
         self.assertEqual(1, result.failure_count)
         self.assertIn("C 盘", result.items[0].message)
+
+    def test_execute_rejects_drive_relative_candidates(self) -> None:
+        forged = Candidate(
+            candidate_id="forged-drive-relative",
+            path=Path(r"C:Temp\cache.tmp"),
+            source_root=Path(r"C:Temp"),
+            source_root_identity=DirectoryIdentity(1, 1),
+            rule_id="forged",
+            category="伪造候选项",
+            size_bytes=1,
+            modified_at=datetime.now(UTC),
+            risk=RiskLevel.LOW,
+            reason="测试",
+            fingerprint=FileFingerprint(1, 1, 1, 1),
+        )
+
+        result = CleanupExecutor(backend=RecordingRemovalBackend()).execute(
+            [forged], mode=CleanupMode.RECYCLE
+        )
+
+        self.assertEqual(1, result.failure_count)
+        self.assertIn("绝对路径", result.items[0].message)
 
 
 if __name__ == "__main__":
