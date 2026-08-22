@@ -366,6 +366,31 @@ class CleanupExecutorTests(unittest.TestCase):
             self.assertTrue(entry.stored_path.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
+    def test_quarantine_inspection_reports_deeply_nested_json(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            base = Path(temp_dir)
+            source_root = base / "source"
+            source_root.mkdir()
+            reviewed = source_root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            app_data = base / "appdata"
+            app_data.mkdir()
+            store = QuarantineStore(
+                app_data / "慎清" / "Quarantine", allowed_drive=base.drive
+            )
+            WindowsRemovalBackend(store).quarantine(candidate_for(reviewed, source_root))
+            entry = store.list_entries()[0]
+            entry.manifest_path.write_text(
+                "[" * 2_000 + "0" + "]" * 2_000, encoding="utf-8"
+            )
+
+            report = store.inspect_entries()
+
+            self.assertEqual([], report.entries)
+            self.assertEqual(1, len(report.warnings))
+            self.assertTrue(entry.stored_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 隔离区测试")
     def test_quarantine_restore_rejects_a_replaced_entry_directory(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             base = Path(temp_dir)

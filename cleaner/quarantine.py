@@ -172,6 +172,7 @@ class QuarantineStore:
                         KeyError,
                         TypeError,
                         OverflowError,
+                        RecursionError,
                         json.JSONDecodeError,
                     ) as exc:
                         warnings.append(f"无法读取隔离项目 {entry_dir}：{exc}")
