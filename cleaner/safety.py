@@ -75,6 +75,27 @@ def is_reparse_point(stat_result: os.stat_result) -> bool:
     return bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT)
 
 
+def windows_explorer_path() -> Path:
+    """Return Explorer from the Windows directory without consulting PATH."""
+    if os.name != "nt":
+        raise OSError("Windows Explorer 路径仅支持 Windows")
+    buffer = ctypes.create_unicode_buffer(32_768)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_windows_directory = kernel32.GetWindowsDirectoryW
+    get_windows_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+    get_windows_directory.restype = ctypes.c_uint32
+    length = get_windows_directory(buffer, len(buffer))
+    if length == 0:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "无法读取受信任的 Windows 目录")
+    if length >= len(buffer):
+        raise OSError("Windows 目录路径超出安全缓冲区")
+    explorer = Path(buffer.value) / "explorer.exe"
+    if not explorer.is_file():
+        raise FileNotFoundError(f"未找到系统 Explorer：{explorer}")
+    return explorer
+
+
 def _directory_components(path: Path) -> list[Path]:
     if not path.is_absolute() or not path.anchor:
         raise DirectoryLockError(f"目录必须是绝对路径：{path}")

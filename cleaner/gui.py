@@ -16,6 +16,7 @@ from .cleanup import CleanupExecutor, CleanupMode, WindowsRemovalBackend
 from .models import Candidate, CleanupResult, RiskLevel, ScanReport
 from .policy import CleanupPolicy, build_default_policy
 from .quarantine import QuarantineEntry, QuarantineStore
+from .safety import windows_explorer_path
 from .scanner import CleanupScanner
 
 COLORS = {
@@ -760,7 +761,11 @@ class CleanerApp(tk.Tk):
             return
         path = self.candidates[selected[0]].path
         try:
-            subprocess.Popen(["explorer.exe", "/select,", str(path)])
+            # The executable comes from GetWindowsDirectoryW and the candidate is
+            # an absolute reviewed path. A list of args keeps shell parsing disabled.
+            subprocess.Popen(  # noqa: S603
+                [str(windows_explorer_path()), "/select,", str(path)], shell=False
+            )
         except OSError as exc:
             messagebox.showerror("无法打开", str(exc), parent=self)
 
