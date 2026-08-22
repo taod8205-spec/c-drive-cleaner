@@ -60,13 +60,6 @@ class CleanupScanner:
             report.warnings.append(f"已跳过非 C 盘绝对扫描源：{root}")
             return
         try:
-            root.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            report.warnings.append(f"无法读取扫描源 {root}：{exc}")
-            return
-        try:
             with DirectoryChainLock(root):
                 root_stat = root.stat(follow_symlinks=False)
                 if not stat.S_ISDIR(root_stat.st_mode):
@@ -109,6 +102,8 @@ class CleanupScanner:
                     if len(report.candidates) >= self._max_candidates:
                         return
         except DirectoryLockError as exc:
+            if exc.errno in (2, 3):
+                return
             report.warnings.append(f"为防止越界，已跳过扫描源 {root}：{exc}")
 
     def _walk_files(

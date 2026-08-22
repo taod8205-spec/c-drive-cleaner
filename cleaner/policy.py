@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from .models import RiskLevel, ScanRule
+from .safety import DirectoryChainLock, DirectoryLockError, is_reparse_point
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +40,18 @@ def _browser_rules(
     profiles: dict[str, Path] = {"default": user_data_root / "Default"}
     if discover_profiles:
         try:
-            if not user_data_root.is_dir():
-                raise FileNotFoundError
-            for path in user_data_root.iterdir():
-                if path.is_dir() and path.name.casefold().startswith("profile "):
-                    profiles[path.name.casefold()] = path
-        except (OSError, PermissionError):
+            with DirectoryChainLock(user_data_root):
+                with os.scandir(user_data_root) as entries:
+                    for entry in entries:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                        if (
+                            stat.S_ISDIR(entry_stat.st_mode)
+                            and not entry.is_symlink()
+                            and not is_reparse_point(entry_stat)
+                            and entry.name.casefold().startswith("profile ")
+                        ):
+                            profiles[entry.name.casefold()] = Path(entry.path)
+        except (DirectoryLockError, OSError):
             pass
 
     rules: list[ScanRule] = []

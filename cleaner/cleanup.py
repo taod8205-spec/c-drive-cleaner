@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import stat
+import uuid
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
@@ -15,7 +16,17 @@ from .models import (
     FileFingerprint,
     RiskLevel,
 )
-from .safety import DirectoryChainLock, DirectoryLockError, is_reparse_point
+from .safety import (
+    DirectoryChainLock,
+    DirectoryLockError,
+    ExactFileError,
+    close_windows_handle,
+    get_opened_file_identity,
+    is_reparse_point,
+    mark_opened_file_for_deletion,
+    open_exact_windows_file,
+    rename_opened_file,
+)
 
 
 class CleanupMode(Enum):
@@ -24,9 +35,9 @@ class CleanupMode(Enum):
 
 
 class RemovalBackend(Protocol):
-    def recycle(self, path: Path) -> None: ...
+    def recycle(self, candidate: Candidate) -> None: ...
 
-    def permanently_delete(self, path: Path) -> None: ...
+    def permanently_delete(self, candidate: Candidate) -> None: ...
 
 
 def _is_descendant(path: Path, root: Path) -> bool:
@@ -42,9 +53,35 @@ def _is_descendant(path: Path, root: Path) -> bool:
 class WindowsRemovalBackend:
     """使用 Windows 回收站，或在用户二次确认后永久删除普通文件。"""
 
-    def recycle(self, path: Path) -> None:
+    def recycle(self, candidate: Candidate) -> None:
         if os.name != "nt":
             raise RuntimeError("移动到回收站仅支持 Windows")
+
+        handle = self._open_verified_candidate(candidate)
+        original_path = candidate.path
+        prefix = f".慎清-{uuid.uuid4().hex}-"
+        max_original_length = max(1, 240 - len(prefix))
+        staged_path = original_path.with_name(
+            prefix + original_path.name[:max_original_length]
+        )
+        try:
+            rename_opened_file(handle, staged_path)
+        finally:
+            close_windows_handle(handle)
+
+        try:
+            self._recycle_staged_path(staged_path)
+        except OSError as exc:
+            try:
+                staged_path.rename(original_path)
+            except OSError as restore_error:
+                raise OSError(
+                    f"回收失败，文件安全保留在 {staged_path}；恢复原名也失败："
+                    f"{restore_error}"
+                ) from exc
+            raise
+
+    def _recycle_staged_path(self, path: Path) -> None:
 
         class SHFILEOPSTRUCTW(ctypes.Structure):
             _fields_ = [
@@ -68,8 +105,31 @@ class WindowsRemovalBackend:
         if operation.fAnyOperationsAborted:
             raise OSError("回收操作已取消")
 
-    def permanently_delete(self, path: Path) -> None:
-        path.unlink()
+    def permanently_delete(self, candidate: Candidate) -> None:
+        handle = self._open_verified_candidate(candidate)
+        try:
+            mark_opened_file_for_deletion(handle)
+        finally:
+            close_windows_handle(handle)
+
+    @staticmethod
+    def _open_verified_candidate(candidate: Candidate) -> int:
+        handle = open_exact_windows_file(candidate.path)
+        try:
+            identity = get_opened_file_identity(handle)
+            fingerprint = candidate.fingerprint
+            if identity.is_reparse_point:
+                raise ExactFileError("候选文件已变成重解析点")
+            if (
+                identity.size != fingerprint.size
+                or identity.modified_ns != fingerprint.modified_ns
+                or identity.file_index != fingerprint.inode
+            ):
+                raise ExactFileError("候选文件在最终句柄锁定前已发生变化")
+        except Exception:
+            close_windows_handle(handle)
+            raise
+        return handle
 
 
 class CleanupExecutor:
@@ -120,10 +180,10 @@ class CleanupExecutor:
                         continue
 
                     if mode is CleanupMode.RECYCLE:
-                        self._backend.recycle(candidate.path)
+                        self._backend.recycle(candidate)
                         message = "已移到回收站"
                     else:
-                        self._backend.permanently_delete(candidate.path)
+                        self._backend.permanently_delete(candidate)
                         message = "已永久删除"
                     result.items.append(CleanupItemResult(candidate, True, message))
             except DirectoryLockError as exc:

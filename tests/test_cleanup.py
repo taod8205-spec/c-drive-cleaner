@@ -4,7 +4,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from cleaner.cleanup import CleanupExecutor, CleanupMode
+from cleaner.cleanup import CleanupExecutor, CleanupMode, WindowsRemovalBackend
 from cleaner.models import Candidate, DirectoryIdentity, FileFingerprint, RiskLevel
 
 
@@ -13,11 +13,11 @@ class RecordingRemovalBackend:
         self.recycled: list[Path] = []
         self.deleted: list[Path] = []
 
-    def recycle(self, path: Path) -> None:
-        self.recycled.append(path)
+    def recycle(self, candidate: Candidate) -> None:
+        self.recycled.append(candidate.path)
 
-    def permanently_delete(self, path: Path) -> None:
-        self.deleted.append(path)
+    def permanently_delete(self, candidate: Candidate) -> None:
+        self.deleted.append(candidate.path)
 
 
 def candidate_for(path: Path, source_root: Path) -> Candidate:
@@ -200,6 +200,27 @@ class CleanupExecutorTests(unittest.TestCase):
 
         self.assertEqual(1, result.failure_count)
         self.assertIn("绝对路径", result.items[0].message)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 句柄接口测试")
+    def test_windows_backend_rejects_leaf_replacement_after_review(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            reviewed = root / "reviewed.tmp"
+            reviewed.write_bytes(b"reviewed bytes")
+            candidate = candidate_for(reviewed, root)
+            moved = root / "moved-original.tmp"
+            reviewed.rename(moved)
+            reviewed.write_bytes(b"replacement!!!")
+            os.utime(
+                reviewed,
+                ns=(candidate.fingerprint.modified_ns, candidate.fingerprint.modified_ns),
+            )
+
+            with self.assertRaises(OSError):
+                WindowsRemovalBackend().permanently_delete(candidate)
+
+            self.assertTrue(reviewed.exists())
+            self.assertTrue(moved.exists())
 
 
 if __name__ == "__main__":
