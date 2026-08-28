@@ -1,93 +1,94 @@
-# 慎清 · C 盘清理审查器
+**English** | [简体中文](README.zh-CN.md)
 
-一个面向 Windows 的保守型磁盘清理工具。它的第一目标不是“尽量多删”，而是让你在任何文件操作发生前，看到候选项的完整路径、大小、时间、类别、风险等级和风险理由。
+# Shenqing · C Drive Cleanup Auditor
 
-## 安全设计
+A conservative disk cleanup tool for Windows. Its primary goal is not to delete as much as possible, but to let you review every candidate's full path, size, timestamps, category, risk level, and risk rationale before any file operation takes place.
 
-- 扫描是只读操作，启动后不会自动勾选或删除任何文件。
-- 仅扫描代码中明确列出的缓存、临时文件和诊断目录；不会泛扫整个 C 盘。
-- 所有候选文件至少保留 7 天；系统相关项目通常保留 14～30 天。
-- 不扫描桌面、文档、下载、图片、音乐、视频、OneDrive 或 `AppData\Roaming`。
-- 不跟随符号链接、目录联接或其他重解析点。
-- 扫描和清理期间会锁住从盘符到候选项的目录链，拒绝任何含链接或重解析点的祖先路径，防止检查后被替换。
-- 文件执行前会再次检查绝对路径、目标盘、扫描根身份、类型、大小、修改时间和文件标识；扫描后被替换或修改的文件会保留。
-- 默认操作是“移到安全隔离区”。隔离项目会记录原路径，可在软件中逐项查看并恢复；软件不会自动清空隔离区。
-- 隔离和永久删除都通过复验后的文件句柄执行；若文件或目录在审查后发生变化，操作会被拒绝。
-- 永久删除需要输入确认短语；高风险项目在界面和执行器两层都禁止永久删除。
-- 权限不足、文件被占用或路径异常时，结果是“跳过/保留”，不会尝试提权或强制接管权限。
+## Safety Design
 
-## 风险等级
+- Scanning is read-only. Starting a scan never automatically selects or deletes any file.
+- Only explicitly listed cache, temporary-file, and diagnostic directories are scanned; the tool never sweeps the entire C drive.
+- Every candidate must be at least 7 days old. System-related items usually have retention thresholds of 14–30 days.
+- Desktop, Documents, Downloads, Pictures, Music, Videos, OneDrive, and `AppData\Roaming` are excluded.
+- Symbolic links, directory junctions, and other reparse points are not followed.
+- During scanning and cleanup, the directory chain from the drive root to each candidate is locked. Any path with a link or reparse-point ancestor is rejected to prevent replacement after inspection.
+- Before acting on a file, the tool revalidates its absolute path, target drive, scan-root identity, type, size, modification time, and file identity. Files replaced or modified after scanning are preserved.
+- The default action is **Move to Safety Quarantine**. Quarantined items retain their original paths and can be reviewed and restored individually in the application. The quarantine is never emptied automatically.
+- Quarantine and permanent deletion both operate through revalidated file handles. If a file or directory changes after review, the operation is rejected.
+- Permanent deletion requires entering a confirmation phrase. High-risk items are blocked from permanent deletion in both the interface and the executor.
+- If permissions are insufficient, a file is in use, or a path is abnormal, the result is **Skipped/Preserved**. The tool does not attempt privilege escalation or forcefully take ownership.
 
-| 等级 | 典型候选项 | 策略 |
+## Risk Levels
+
+| Level | Typical candidates | Policy |
 | --- | --- | --- |
-| 低 | 超过 7 天的当前用户临时文件 | 仍然默认不勾选，可用“勾选全部低风险”手动选择 |
-| 中 | 浏览器缓存、缩略图缓存、崩溃转储、Windows 临时文件、错误报告 | 建议逐项核对，并先关闭相关应用 |
-| 高 | Windows 更新下载缓存、蓝屏小型内存转储 | 红色标注；需输入复核短语；禁止永久删除 |
+| Low | Current-user temporary files older than 7 days | Still unselected by default; users may select them manually with “Select All Low-Risk” |
+| Medium | Browser caches, thumbnail caches, crash dumps, Windows temporary files, error reports | Review individually and close the related applications first |
+| High | Windows Update download cache, small memory dumps from system crashes | Highlighted in red; requires a review phrase; permanent deletion is prohibited |
 
-“低风险”不等于“零风险”。例如安装程序、尚未结束的应用会话也可能临时使用旧文件，所以软件始终要求人工审查。
+“Low risk” does not mean “zero risk.” Installers or application sessions that have not yet ended may still use older temporary files, so the application always requires human review.
 
-## 明确不清理的内容
+## Explicitly Excluded
 
-- `WinSxS`、`System32`、`SysWOW64`、Windows Installer 和 servicing 组件
-- Program Files、ProgramData Package Cache、注册表、驱动、启动项和还原点
-- 用户个人文件、浏览器历史/书签/密码/Cookie、应用配置和漫游数据
-- Windows 回收站和本软件的安全隔离区；两者都不会被扫描或自动清空
-- 目录本身；本工具只处理扫描时识别出的普通文件
+- `WinSxS`, `System32`, `SysWOW64`, Windows Installer, and servicing components
+- Program Files, the ProgramData Package Cache, the registry, drivers, startup items, and restore points
+- Personal files, browser history/bookmarks/passwords/cookies, application settings, and roaming data
+- The Windows Recycle Bin and this application's safety quarantine; neither is scanned or emptied automatically
+- Directories themselves; the tool acts only on regular files identified during scanning
 
-## 使用
+## Usage
 
-最方便的方式是双击 `启动C盘清理器.cmd`。电脑需要 Python 3.11 或更高版本，界面只使用 Python 自带的 Tkinter，无第三方运行依赖。
+The easiest way to start the application is to double-click `启动C盘清理器.cmd`. Python 3.11 or later is required. The interface uses only Python's built-in Tkinter library and has no third-party runtime dependencies.
 
-也可以在项目目录运行：
+You can also run the following command from the project directory:
 
 ```powershell
 py -3 app.py
 ```
 
-建议流程：
+Recommended workflow:
 
-1. 等待只读扫描结束。
-2. 按风险筛选并查看每条完整路径和下方风险理由；必要时用“打开所在位置”核对。
-3. 可先导出 CSV 审查清单。
-4. 只勾选确认不再需要的项目。
-5. 优先选择“移到安全隔离区”。需要撤销时，使用“查看/恢复隔离区”逐项恢复。
-6. 确认系统和应用正常后，可在隔离区逐项永久删除低/中风险文件以释放空间；仍需输入确认短语，高风险项继续禁止永久删除。
+1. Wait for the read-only scan to finish.
+2. Filter by risk level, review each full path and its risk rationale, and use **Open File Location** to verify items when necessary.
+3. Optionally export the review list as CSV.
+4. Select only items you have confirmed are no longer needed.
+5. Prefer **Move to Safety Quarantine**. To undo an action, open **View/Restore Quarantine** and restore items individually.
+6. After confirming that the system and applications work normally, permanently delete low- or medium-risk files from quarantine individually to reclaim space. A confirmation phrase is still required, and high-risk items remain protected from permanent deletion.
 
-## 构建独立 EXE
+## Building a Standalone EXE
 
-开发环境安装 PyInstaller 后运行：
+Install PyInstaller in the development environment, then run:
 
 ```powershell
 py -m pip install pyinstaller
 .\build_exe.ps1
 ```
 
-输出位于 `dist\慎清-C盘清理审查器.exe`。程序使用 `asInvoker` 行为，不主动申请管理员权限；无权访问的位置会安全跳过。
+The output is written to `dist\慎清-C盘清理审查器.exe`. The application uses `asInvoker` behavior and does not request administrator privileges. Locations it cannot access are safely skipped.
 
-## 测试
+## Testing
 
 ```powershell
 py -3 -m unittest discover -s tests -v
 ```
 
-测试覆盖年龄门槛、风险标注、链接跳过、只处理显式选择、非 C 盘/相对路径拒绝、扫描根替换拒绝、扫描后变更拒绝、隔离/恢复、异常隔离清单保留，以及高风险永久删除禁令。
+Tests cover age thresholds, risk labeling, link skipping, explicit-selection enforcement, rejection of non-C-drive and relative paths, scan-root replacement rejection, post-scan change rejection, quarantine and restoration, preservation of the quarantine manifest after failures, and the permanent-deletion ban for high-risk items.
 
-## 重要限制
+## Important Limitations
 
-- 安全隔离具有可恢复性，但隔离文件仍位于 C 盘，不会释放磁盘空间；只有明确选择永久删除才会释放对应空间。
-- Windows 或应用正在使用的文件可能无法处理，这是预期的保守失败模式。
-- 高风险项可能含有更新或故障诊断证据；没有明确理由时应保持未勾选。
-- 使用前仍建议保留重要数据备份和可用的系统还原方案。
+- Safety quarantine is reversible, but quarantined files remain on the C drive and therefore do not free disk space. Space is reclaimed only after explicit permanent deletion.
+- Windows or application processes may prevent files in use from being handled. This is the expected conservative failure mode.
+- High-risk items may contain update data or diagnostic evidence. Leave them unselected unless you have a clear reason to remove them.
+- Keep backups of important data and an available system recovery option before use.
 
-## 参与贡献与安全报告
+## Contributing and Security Reports
 
-提交代码前请阅读 [贡献指南](CONTRIBUTING.md)。安全漏洞请按照
-[安全政策](SECURITY.md) 私下报告，不要在公开 Issue 中披露利用细节或敏感数据。
+Read the [Contributing Guide](CONTRIBUTING.md) before submitting code. Report security vulnerabilities privately according to the [Security Policy](SECURITY.md); do not disclose exploit details or sensitive data in a public issue.
 
-## 许可证
+## License
 
-本项目采用 [MIT License](LICENSE) 开源。
+This project is open source under the [MIT License](LICENSE).
 
-## 维护者
+## Maintainer
 
 [@taod8205-spec](https://github.com/taod8205-spec)
