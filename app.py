@@ -1,4 +1,4 @@
-from cleaner.gui import run
+from cleaner.ui import run
 
 if __name__ == "__main__":
     run()

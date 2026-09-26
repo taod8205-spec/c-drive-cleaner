@@ -9,6 +9,31 @@ from cleaner.scanner import CleanupScanner
 
 
 class CleanupScannerTests(unittest.TestCase):
+    def test_mixed_case_patterns_preserve_matching_and_age_gate(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            now = datetime.now(UTC)
+            old = (now - timedelta(days=20)).timestamp()
+            for name in ("OLD.TmP", "thumbCACHE-1.DB", "keep.txt", "fresh.tmp"):
+                path = root / name
+                path.write_bytes(b"test")
+                if name != "fresh.tmp":
+                    os.utime(path, (old, old))
+            rule = ScanRule(
+                rule_id="mixed-patterns",
+                category="测试缓存",
+                root=root,
+                min_age_days=7,
+                risk=RiskLevel.LOW,
+                reason="测试",
+                patterns=("*.TMP", "ThumbCache*.dB"),
+            )
+            report = CleanupScanner([rule], now=lambda: now, allowed_drive=root.drive).scan()
+            self.assertEqual(
+                {"OLD.TmP", "thumbCACHE-1.DB"},
+                {candidate.path.name for candidate in report.candidates},
+            )
+
     def test_scan_lists_only_old_files_with_risk_context(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
@@ -32,9 +57,7 @@ class CleanupScannerTests(unittest.TestCase):
                 reason="超过 7 天的可重建测试缓存",
             )
 
-            report = CleanupScanner(
-                [rule], now=lambda: now, allowed_drive=root.drive
-            ).scan()
+            report = CleanupScanner([rule], now=lambda: now, allowed_drive=root.drive).scan()
 
             self.assertEqual([old_file], [item.path for item in report.candidates])
             self.assertEqual("低", report.candidates[0].risk.label)
@@ -71,9 +94,7 @@ class CleanupScannerTests(unittest.TestCase):
                 reason="测试",
             )
 
-            report = CleanupScanner(
-                [rule], now=lambda: now, allowed_drive=root.drive
-            ).scan()
+            report = CleanupScanner([rule], now=lambda: now, allowed_drive=root.drive).scan()
 
             self.assertEqual([], report.candidates)
             self.assertTrue(any("链接" in warning for warning in report.warnings))

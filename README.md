@@ -13,7 +13,7 @@ A conservative disk cleanup tool for Windows. Its primary goal is not to delete 
 - Symbolic links, directory junctions, and other reparse points are not followed.
 - During scanning and cleanup, the directory chain from the drive root to each candidate is locked. Any path with a link or reparse-point ancestor is rejected to prevent replacement after inspection.
 - Before acting on a file, the tool revalidates its absolute path, target drive, scan-root identity, type, size, modification time, and file identity. Files replaced or modified after scanning are preserved.
-- The default action is **Move to Safety Quarantine**. Quarantined items retain their original paths and can be reviewed and restored individually in the application. The quarantine is never emptied automatically.
+- The default action is **Move to Safety Quarantine**. Quarantined items retain their original paths and can be selected for batch restoration after review. The quarantine is never emptied automatically.
 - Quarantine and permanent deletion both operate through revalidated file handles. If a file or directory changes after review, the operation is rejected.
 - Permanent deletion requires entering a confirmation phrase. High-risk items are blocked from permanent deletion in both the interface and the executor.
 - If permissions are insufficient, a file is in use, or a path is abnormal, the result is **Skipped/Preserved**. The tool does not attempt privilege escalation or forcefully take ownership.
@@ -52,8 +52,12 @@ Recommended workflow:
 2. Filter by risk level, review each full path and its risk rationale, and use **Open File Location** to verify items when necessary.
 3. Optionally export the review list as CSV.
 4. Select only items you have confirmed are no longer needed.
-5. Prefer **Move to Safety Quarantine**. To undo an action, open **View/Restore Quarantine** and restore items individually.
-6. After confirming that the system and applications work normally, permanently delete low- or medium-risk files from quarantine individually to reclaim space. A confirmation phrase is still required, and high-risk items remain protected from permanent deletion.
+5. Prefer **Move to Safety Quarantine**. To undo an action, open **View/Restore Quarantine**. Use Ctrl or Shift to select multiple entries, or **Select All**, then restore the reviewed selection.
+6. After confirming that the system and applications work normally, you may permanently delete selected low- or medium-risk quarantine entries to reclaim space. A confirmation phrase is required. If the selection contains any high-risk entry, the entire delete batch is blocked.
+
+The initial window fits the monitor work area, including room for the taskbar and title bar. Action buttons stay outside the scrollable table; toolbars wrap in narrow windows, and the table scrolls in both directions. On short windows, decorative summary cards collapse while the selected count remains visible near the cleanup action.
+
+Quarantine batches use a snapshot of the confirmed selection. Each item still passes the existing safety checks. An in-use file, an occupied restore path, or another per-item error does not stop the remaining items. The results view shows successes, failures, and manifest warnings and can scroll through the full report.
 
 ## Building a Standalone EXE
 
@@ -73,6 +77,8 @@ py -3 -m unittest discover -s tests -v
 ```
 
 Tests cover age thresholds, risk labeling, link skipping, explicit-selection enforcement, rejection of non-C-drive and relative paths, scan-root replacement rejection, post-scan change rejection, quarantine and restoration, preservation of the quarantine manifest after failures, and the permanent-deletion ban for high-risk items.
+
+UI tests use an empty scan policy and a simulated quarantine, so they do not scan real files. They also cover action visibility in small windows, work-area sizing, multi-selection, batch cancellation, partial failures, and rejection of a mixed high-risk delete batch. Set `CLEANER_TEST_SCALING=2.0` or `2.667` to check layout at roughly 150% or 200% text scaling.
 
 ## Important Limitations
 

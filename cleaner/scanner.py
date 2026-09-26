@@ -13,8 +13,9 @@ from .safety import DirectoryChainLock, DirectoryLockError, is_reparse_point
 
 
 def _matches(filename: str, patterns: tuple[str, ...]) -> bool:
+    """文件名匹配；patterns 必须已完成 casefold。"""
     lowered = filename.casefold()
-    return any(fnmatch.fnmatchcase(lowered, pattern.casefold()) for pattern in patterns)
+    return any(fnmatch.fnmatchcase(lowered, pattern) for pattern in patterns)
 
 
 class CleanupScanner:
@@ -52,9 +53,7 @@ class CleanupScanner:
         )
         return report
 
-    def _scan_rule(
-        self, rule: ScanRule, current_time: datetime, report: ScanReport
-    ) -> None:
+    def _scan_rule(self, rule: ScanRule, current_time: datetime, report: ScanReport) -> None:
         root = rule.root
         if not root.is_absolute() or root.drive.casefold() != self._allowed_drive:
             report.warnings.append(f"已跳过非 C 盘绝对扫描源：{root}")
@@ -66,14 +65,13 @@ class CleanupScanner:
                     report.warnings.append(f"跳过非目录扫描源：{root}")
                     return
                 if stat.S_ISLNK(root_stat.st_mode) or is_reparse_point(root_stat):
-                    report.warnings.append(
-                        f"为防止越界，已跳过链接或重解析点：{root}"
-                    )
+                    report.warnings.append(f"为防止越界，已跳过链接或重解析点：{root}")
                     return
 
                 cutoff = current_time - timedelta(days=rule.min_age_days)
                 source_root_identity = DirectoryIdentity.from_stat(root_stat)
-                for path, path_stat in self._walk_files(rule, report):
+                lowered_patterns = tuple(pattern.casefold() for pattern in rule.patterns)
+                for path, path_stat in self._walk_files(rule, lowered_patterns, report):
                     report.scanned_files += 1
                     modified_at = datetime.fromtimestamp(path_stat.st_mtime, UTC)
                     if modified_at > cutoff:
@@ -107,7 +105,7 @@ class CleanupScanner:
             report.warnings.append(f"为防止越界，已跳过扫描源 {root}：{exc}")
 
     def _walk_files(
-        self, rule: ScanRule, report: ScanReport
+        self, rule: ScanRule, patterns: tuple[str, ...], report: ScanReport
     ) -> Iterator[tuple[Path, os.stat_result]]:
         pending = [rule.root]
         while pending:
@@ -116,16 +114,10 @@ class CleanupScanner:
                 with DirectoryChainLock(directory):
                     directory_stat = directory.stat(follow_symlinks=False)
                     if not stat.S_ISDIR(directory_stat.st_mode):
-                        report.warnings.append(
-                            f"扫描期间目录类型已改变，已跳过：{directory}"
-                        )
+                        report.warnings.append(f"扫描期间目录类型已改变，已跳过：{directory}")
                         continue
-                    if stat.S_ISLNK(directory_stat.st_mode) or is_reparse_point(
-                        directory_stat
-                    ):
-                        report.warnings.append(
-                            f"扫描期间检测到链接或重解析点，已跳过：{directory}"
-                        )
+                    if stat.S_ISLNK(directory_stat.st_mode) or is_reparse_point(directory_stat):
+                        report.warnings.append(f"扫描期间检测到链接或重解析点，已跳过：{directory}")
                         continue
                     with os.scandir(directory) as entries:
                         for entry in entries:
@@ -143,7 +135,7 @@ class CleanupScanner:
                                     continue
                                 if not stat.S_ISREG(entry_stat.st_mode):
                                     continue
-                                if _matches(entry.name, rule.patterns):
+                                if _matches(entry.name, patterns):
                                     yield path, entry_stat
                             except OSError as exc:
                                 report.warnings.append(f"无法读取 {path}：{exc}")

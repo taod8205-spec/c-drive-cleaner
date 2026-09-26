@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 1, 0, 0),
+    prodvers=(1, 1, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable('080404b0', [
         StringStruct('CompanyName', '本地工具'),
         StringStruct('FileDescription', '慎清 · C 盘清理审查器'),
-        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('FileVersion', '1.1.0'),
         StringStruct('InternalName', 'ConservativeDriveCleaner'),
         StringStruct('OriginalFilename', '慎清-C盘清理审查器.exe'),
         StringStruct('ProductName', '慎清 · C 盘清理审查器'),
-        StringStruct('ProductVersion', '1.0.0')
+        StringStruct('ProductVersion', '1.1.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
